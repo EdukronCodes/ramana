@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Processor - AI-Powered Document Analysis</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📄 PDF Processor</h1>
+            <p class="subtitle">AI-Powered Document Analysis with Multi-Agent System</p>
+        </header>
+
+        <main>
+            <!-- Upload Section -->
+            <section class="card">
+                <h2>📤 Upload PDF</h2>
+                <div class="upload-form">
+                    <input type="file" id="pdfFile" accept=".pdf" />
+                    <input type="text" id="documentId" placeholder="Document ID (e.g., doc-001)" />
+                    <button onclick="uploadPDF()" class="btn btn-primary">Upload & Process</button>
+                </div>
+                <div id="uploadStatus" class="status-message"></div>
+            </section>
+
+            <!-- Document List -->
+            <section class="card">
+                <h2>📚 Documents</h2>
+                <button onclick="loadDocuments()" class="btn btn-secondary">Refresh List</button>
+                <div id="documentList" class="document-list"></div>
+            </section>
+
+            <!-- Query Section -->
+            <section class="card">
+                <h2>❓ Ask Questions</h2>
+                <div class="query-form">
+                    <select id="queryDocId" class="select-input">
+                        <option value="">Select a document...</option>
+                    </select>
+                    <textarea id="queryInput" placeholder="Ask a question about the document..." rows="3"></textarea>
+                    <button onclick="queryPDF()" class="btn btn-primary">Ask Question</button>
+                </div>
+                <div id="queryResult" class="result-box"></div>
+            </section>
+
+            <!-- Summarization Section -->
+            <section class="card">
+                <h2>📝 Generate Summary</h2>
+                <div class="summary-form">
+                    <select id="summaryDocId" class="select-input">
+                        <option value="">Select a document...</option>
+                    </select>
+                    <select id="summaryType" class="select-input">
+                        <option value="detailed">Detailed Summary</option>
+                        <option value="brief">Brief Summary</option>
+                        <option value="executive">Executive Summary</option>
+                    </select>
+                    <button onclick="summarizePDF()" class="btn btn-primary">Generate Summary</button>
+                </div>
+                <div id="summaryResult" class="result-box"></div>
+            </section>
+
+            <!-- Extraction Section -->
+            <section class="card">
+                <h2>🔍 Extract Information</h2>
+                <div class="extract-form">
+                    <select id="extractDocId" class="select-input">
+                        <option value="">Select a document...</option>
+                    </select>
+                    <select id="extractType" class="select-input">
+                        <option value="key_points">Key Points</option>
+                        <option value="statistics">Statistics & Numbers</option>
+                        <option value="references">References & Citations</option>
+                        <option value="definitions">Definitions & Terms</option>
+                        <option value="action_items">Action Items</option>
+                    </select>
+                    <button onclick="extractInfo()" class="btn btn-primary">Extract</button>
+                </div>
+                <div id="extractResult" class="result-box"></div>
+            </section>
+        </main>
+
+        <footer>
+            <p>Powered by Gemini AI & LangChain Multi-Agent System</p>
+        </footer>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div id="loadingOverlay" class="loading-overlay">
+        <div class="spinner"></div>
+        <p>Processing...</p>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
