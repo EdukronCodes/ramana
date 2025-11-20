@@ -14,6 +14,9 @@ from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import Chroma
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+from queue import Queue
 
 from .config import (
     GOOGLE_API_KEY,
@@ -28,9 +31,9 @@ logger = logging.getLogger(__name__)
 
 
 class PDFProcessor:
-    """Handles PDF processing operations."""
+    """Handles PDF processing operations with multithreading support."""
 
-    def __init__(self):
+    def __init__(self, max_workers: int = 4):
         self.embeddings = GoogleGenerativeAIEmbeddings(
             model="models/embedding-001",
             google_api_key=GOOGLE_API_KEY
@@ -42,6 +45,10 @@ class PDFProcessor:
         )
         self.metadata_file = UPLOAD_DIR / "metadata.json"
         self._load_metadata()
+        self.max_workers = max_workers
+        self.executor = ThreadPoolExecutor(max_workers=max_workers)
+        self.processing_status = {}
+        self.status_lock = threading.Lock()
 
     def _load_metadata(self):
         """Load document metadata from file."""
@@ -96,31 +103,59 @@ class PDFProcessor:
             logger.error(f"Error validating PDF: {str(e)}")
             return {"valid": False, "error": str(e)}
 
-    def extract_text(self, file_path: str) -> List[str]:
+    def _extract_page_text(self, page_data: tuple) -> tuple:
+        """Extract text from a single page (thread-safe)."""
+        page_num, page = page_data
+        try:
+            text = page.extract_text()
+            return (page_num, text.strip() if text else "")
+        except Exception as e:
+            logger.error(f"Error extracting text from page {page_num + 1}: {str(e)}")
+            return (page_num, "")
+
+    def extract_text(self, file_path: str, document_id: str = None) -> List[str]:
         """
-        Extract text from PDF file.
+        Extract text from PDF file using multithreading.
         
         Args:
             file_path: Path to the PDF file
+            document_id: Optional document ID for progress tracking
             
         Returns:
             List of text strings, one per page
         """
         try:
             reader = PdfReader(file_path)
-            pages_text = []
+            num_pages = len(reader.pages)
+            pages_text = [""] * num_pages
 
-            for page_num, page in enumerate(reader.pages):
-                try:
-                    text = page.extract_text()
-                    if text.strip():
-                        pages_text.append(text)
-                    else:
-                        logger.warning(f"Empty text on page {page_num + 1}")
-                        pages_text.append("")
-                except Exception as e:
-                    logger.error(f"Error extracting text from page {page_num + 1}: {str(e)}")
-                    pages_text.append("")
+            # Update status
+            if document_id:
+                with self.status_lock:
+                    self.processing_status[document_id] = {
+                        "stage": "extracting",
+                        "progress": 0,
+                        "total": num_pages
+                    }
+
+            # Process pages in parallel
+            page_data = [(i, page) for i, page in enumerate(reader.pages)]
+            
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                future_to_page = {executor.submit(self._extract_page_text, data): data[0] 
+                                for data in page_data}
+                
+                completed = 0
+                for future in as_completed(future_to_page):
+                    page_num, text = future.result()
+                    pages_text[page_num] = text
+                    completed += 1
+                    
+                    # Update progress
+                    if document_id:
+                        with self.status_lock:
+                            if document_id in self.processing_status:
+                                self.processing_status[document_id]["progress"] = completed
 
             return pages_text
         except Exception as e:
@@ -249,7 +284,7 @@ class PDFProcessor:
 
     def process_pdf(self, document_id: str) -> Dict[str, Any]:
         """
-        Process a PDF: extract text, chunk, and create vector store.
+        Process a PDF: extract text, chunk, and create vector store with multithreading.
         
         Args:
             document_id: Unique identifier for the document
@@ -264,13 +299,37 @@ class PDFProcessor:
         file_path = doc_meta["file_path"]
 
         try:
-            # Extract text
+            # Initialize status
+            with self.status_lock:
+                self.processing_status[document_id] = {
+                    "stage": "starting",
+                    "progress": 0,
+                    "total": 100
+                }
+
+            # Extract text with progress tracking
             logger.info(f"Extracting text from {document_id}")
-            pages_text = self.extract_text(file_path)
+            pages_text = self.extract_text(file_path, document_id)
+
+            # Update status
+            with self.status_lock:
+                self.processing_status[document_id] = {
+                    "stage": "chunking",
+                    "progress": 0,
+                    "total": 100
+                }
 
             # Chunk documents
             logger.info(f"Chunking documents for {document_id}")
             chunked_docs = self.chunk_documents(pages_text, document_id)
+
+            # Update status
+            with self.status_lock:
+                self.processing_status[document_id] = {
+                    "stage": "vectorizing",
+                    "progress": 0,
+                    "total": 100
+                }
 
             # Create vector store
             logger.info(f"Creating vector store for {document_id}")
@@ -281,6 +340,11 @@ class PDFProcessor:
             self.metadata[document_id]["processed"] = True
             self.metadata[document_id]["num_chunks"] = len(chunked_docs)
             self._save_metadata()
+
+            # Clear status
+            with self.status_lock:
+                if document_id in self.processing_status:
+                    del self.processing_status[document_id]
 
             return {
                 "success": True,
@@ -294,7 +358,18 @@ class PDFProcessor:
             self.metadata[document_id]["status"] = "error"
             self.metadata[document_id]["error"] = str(e)
             self._save_metadata()
+            
+            # Clear status
+            with self.status_lock:
+                if document_id in self.processing_status:
+                    del self.processing_status[document_id]
+            
             return {"success": False, "error": str(e)}
+
+    def get_processing_status(self, document_id: str) -> Optional[Dict[str, Any]]:
+        """Get current processing status for a document."""
+        with self.status_lock:
+            return self.processing_status.get(document_id)
 
     def list_documents(self) -> List[Dict[str, Any]]:
         """

@@ -1,6 +1,74 @@
 // API Base URL
 const API_BASE = '';
 
+// WebSocket connection
+let ws = null;
+let reconnectInterval = null;
+
+// Connect to WebSocket
+function connectWebSocket() {
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
+    
+    ws = new WebSocket(wsUrl);
+    
+    ws.onopen = () => {
+        console.log('WebSocket connected');
+        if (reconnectInterval) {
+            clearInterval(reconnectInterval);
+            reconnectInterval = null;
+        }
+    };
+    
+    ws.onmessage = (event) => {
+        const message = JSON.parse(event.data);
+        handleWebSocketMessage(message);
+    };
+    
+    ws.onclose = () => {
+        console.log('WebSocket disconnected');
+        // Attempt to reconnect
+        if (!reconnectInterval) {
+            reconnectInterval = setInterval(() => {
+                console.log('Attempting to reconnect...');
+                connectWebSocket();
+            }, 5000);
+        }
+    };
+    
+    ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+    };
+}
+
+// Handle WebSocket messages
+function handleWebSocketMessage(message) {
+    if (message.type === 'status_update') {
+        updateProcessingStatus(message.data);
+    } else if (message.type === 'processing_complete') {
+        showStatus('uploadStatus', 
+            `✓ Processing complete for ${message.document_id}!`, 
+            'success'
+        );
+        loadDocuments();
+    }
+}
+
+// Update processing status display
+function updateProcessingStatus(statusData) {
+    for (const [docId, status] of Object.entries(statusData)) {
+        const statusElement = document.getElementById('uploadStatus');
+        if (statusElement && statusElement.style.display !== 'none') {
+            const stage = status.stage.charAt(0).toUpperCase() + status.stage.slice(1);
+            const progress = Math.round((status.progress / status.total) * 100);
+            showStatus('uploadStatus', 
+                `${stage}... ${progress}% (${status.progress}/${status.total})`, 
+                'info'
+            );
+        }
+    }
+}
+
 // Utility Functions
 function showLoading(show = true) {
     const overlay = document.getElementById('loadingOverlay');
@@ -182,6 +250,8 @@ async function queryPDF() {
         showLoading(true);
         clearResult('queryResult');
         
+        const startTime = Date.now();
+        
         const response = await fetch(`${API_BASE}/api/query`, {
             method: 'POST',
             headers: {
@@ -194,13 +264,14 @@ async function queryPDF() {
         });
         
         const data = await response.json();
+        const responseTime = ((Date.now() - startTime) / 1000).toFixed(2);
         
         if (!data.success) {
             throw new Error(data.error || 'Query failed');
         }
         
         let resultHTML = `<strong>Question:</strong> ${data.query}<br><br>`;
-        resultHTML += `<strong>Answer:</strong><br>${data.answer}`;
+        resultHTML += `<strong>Answer:</strong> (Response time: ${responseTime}s)<br>${data.answer}`;
         
         if (data.sources && data.sources.length > 0) {
             resultHTML += '<div class="sources"><h4>📚 Sources:</h4>';
@@ -217,12 +288,37 @@ async function queryPDF() {
         
         showResult('queryResult', resultHTML, 'success');
         
+        // Add to chat history if in chat mode
+        if (document.getElementById('chatHistory').classList.contains('active')) {
+            addToChatHistory('user', query);
+            addToChatHistory('assistant', data.answer);
+        }
+        
     } catch (error) {
         console.error('Error:', error);
         showResult('queryResult', `Error: ${error.message}`, 'error');
     } finally {
         showLoading(false);
     }
+}
+
+// Chat mode functionality
+function startChatMode() {
+    const chatHistory = document.getElementById('chatHistory');
+    chatHistory.classList.add('active');
+    chatHistory.innerHTML = '<p><strong>💬 Chat Mode Active</strong></p><hr>';
+}
+
+function addToChatHistory(role, message) {
+    const chatHistory = document.getElementById('chatHistory');
+    const messageDiv = document.createElement('div');
+    messageDiv.className = `chat-message ${role}`;
+    
+    const label = role === 'user' ? '👤 You' : '🤖 Assistant';
+    messageDiv.innerHTML = `<strong>${label}:</strong>${message}`;
+    
+    chatHistory.appendChild(messageDiv);
+    chatHistory.scrollTop = chatHistory.scrollHeight;
 }
 
 // Summarize PDF
@@ -313,8 +409,30 @@ async function extractInfo() {
     }
 }
 
+// Parallel query execution for multiple questions
+async function batchQuery(documentId, questions) {
+    const promises = questions.map(question => 
+        fetch(`${API_BASE}/api/query`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                document_id: documentId,
+                query: question
+            })
+        }).then(r => r.json())
+    );
+    
+    return Promise.all(promises);
+}
+
 // Load documents on page load
 window.addEventListener('DOMContentLoaded', () => {
+    // Connect WebSocket
+    connectWebSocket();
+    
+    // Load documents
     loadDocuments();
     
     // Add enter key support for query
@@ -324,4 +442,28 @@ window.addEventListener('DOMContentLoaded', () => {
             queryPDF();
         }
     });
+    
+    // Periodic status check for documents being processed
+    setInterval(() => {
+        const docs = pdf_processor?.metadata || {};
+        for (const docId in docs) {
+            if (docs[docId].status === 'processing') {
+                checkProcessingStatus(docId);
+            }
+        }
+    }, 2000);
 });
+
+// Check processing status
+async function checkProcessingStatus(documentId) {
+    try {
+        const response = await fetch(`${API_BASE}/api/status/${documentId}`);
+        const data = await response.json();
+        
+        if (data.success && data.status) {
+            updateProcessingStatus({[documentId]: data.status});
+        }
+    } catch (error) {
+        console.error('Error checking status:', error);
+    }
+}

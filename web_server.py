@@ -3,21 +3,48 @@ Web API Server for PDF Processor
 FastAPI server to provide HTTP interface to MCP server
 """
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 import os
 import shutil
 import uvicorn
+import asyncio
+import json
+from concurrent.futures import ThreadPoolExecutor
 
 from src.pdf_processor import pdf_processor
 from src.agents import pdf_agents
 from src.config import UPLOAD_DIR
 
 app = FastAPI(title="PDF Processor API", version="1.0.0")
+
+# Thread pool for background tasks
+executor = ThreadPoolExecutor(max_workers=4)
+
+# WebSocket connection manager
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+    
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+    
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+    
+    async def broadcast(self, message: dict):
+        for connection in self.active_connections:
+            try:
+                await connection.send_json(message)
+            except:
+                pass
+
+manager = ConnectionManager()
 
 # CORS middleware
 app.add_middleware(
@@ -54,6 +81,32 @@ async def read_root():
     return FileResponse("web/index.html")
 
 
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for real-time progress updates."""
+    await manager.connect(websocket)
+    try:
+        while True:
+            # Keep connection alive and send status updates
+            await asyncio.sleep(0.5)
+            
+            # Check processing status for all documents
+            status_updates = {}
+            for doc_id in pdf_processor.metadata.keys():
+                status = pdf_processor.get_processing_status(doc_id)
+                if status:
+                    status_updates[doc_id] = status
+            
+            if status_updates:
+                await websocket.send_json({
+                    "type": "status_update",
+                    "data": status_updates
+                })
+            
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+
+
 @app.post("/api/upload")
 async def upload_pdf(
     file: UploadFile = File(...),
@@ -79,16 +132,35 @@ async def upload_pdf(
 
 
 @app.post("/api/process")
-async def process_pdf(request: ProcessRequest):
-    """Process an uploaded PDF."""
+async def process_pdf(request: ProcessRequest, background_tasks: BackgroundTasks):
+    """Process an uploaded PDF in background."""
     try:
-        result = pdf_processor.process_pdf(request.document_id)
+        # Check if document exists
+        if request.document_id not in pdf_processor.metadata:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        # Start processing in background
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            executor, 
+            pdf_processor.process_pdf, 
+            request.document_id
+        )
         
         if not result.get("success"):
             raise HTTPException(status_code=400, detail=result.get("error"))
         
+        # Broadcast completion
+        await manager.broadcast({
+            "type": "processing_complete",
+            "document_id": request.document_id,
+            "result": result
+        })
+        
         return result
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -151,6 +223,24 @@ async def get_document_info(document_id: str):
 
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/status/{document_id}")
+async def get_processing_status(document_id: str):
+    """Get current processing status for a document."""
+    try:
+        status = pdf_processor.get_processing_status(document_id)
+        if status:
+            return {"success": True, "status": status}
+        else:
+            # Check if document is already processed
+            if document_id in pdf_processor.metadata:
+                doc = pdf_processor.metadata[document_id]
+                if doc.get("processed"):
+                    return {"success": True, "status": {"stage": "completed", "progress": 100, "total": 100}}
+            return {"success": True, "status": None}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
